@@ -4,10 +4,18 @@ from pydantic import BaseModel
 from typing import Dict
 import asyncio
 import random
+import os
+import httpx
+from dotenv import load_dotenv
 
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
 from sqlalchemy.orm import sessionmaker, declarative_base
 from sqlalchemy import Column, Integer, Float, String, select
+
+# -------------------- ENV --------------------
+load_dotenv()
+TONAPI_KEY = os.getenv("TONAPI_TOKEN")
+TARGET_ADDRESS = "UQANOGD2MmdOBjbi2Wy6jGFFAL33ciUwV0X3hXEfdw5OugRm"  # Өз адресің
 
 # -------------------- Database setup --------------------
 DATABASE_URL = "sqlite+aiosqlite:///./aviator.db"
@@ -55,7 +63,7 @@ connections: Dict[int, WebSocket] = {}
 current_multiplier = 1.0
 crash_multiplier = 2.0
 round_active = False
-accepting_bets = False  # ✅ Жаңа флаг
+accepting_bets = False
 
 # -------------------- API Endpoints --------------------
 @app.get("/balance")
@@ -82,7 +90,6 @@ async def topup_balance(data: BalanceTopUp):
 async def place_bet(bet: Bet):
     if not accepting_bets:
         return {"error": "Қазір ставка қабылданбайды"}
-
     async with async_session() as session:
         result = await session.execute(select(User).where(User.user_id == bet.user_id))
         user = result.scalar_one_or_none()
@@ -110,14 +117,10 @@ async def cashout(data: CashoutRequest):
 
 @app.post("/check")
 async def check_transactions():
-    import httpx
-    TONAPI_KEY = "TONAPI_КІЛТ"  # ❗ Өз .env не нақты API кілтіңді енгіз
-    target_address = "UQANOGD2MmdOBjbi2Wy6jGFFAL33ciUwV0X3hXEfdw5OugRm"
-
     async with async_session() as session:
         async with httpx.AsyncClient() as client:
             response = await client.get(
-                f"https://tonapi.io/v2/blockchain/accounts/{target_address}/transactions",
+                f"https://tonapi.io/v2/blockchain/accounts/{TARGET_ADDRESS}/transactions",
                 headers={"Authorization": f"Bearer {TONAPI_KEY}"}
             )
             txs = response.json().get("transactions", [])
@@ -138,13 +141,13 @@ async def check_transactions():
 
                 amount = int(msg.get("value", 0)) / 1e9  # nanoTON → TON
 
-                # Транзакция бұрын тіркелген бе?
-                result = await session.execute(select(ProcessedTransaction).where(ProcessedTransaction.tx_hash == tx_hash))
+                result = await session.execute(
+                    select(ProcessedTransaction).where(ProcessedTransaction.tx_hash == tx_hash)
+                )
                 already_exists = result.scalar_one_or_none()
                 if already_exists:
                     continue
 
-                # Баланс қосу
                 result = await session.execute(select(User).where(User.user_id == user_id))
                 user = result.scalar_one_or_none()
                 if user:
@@ -153,7 +156,6 @@ async def check_transactions():
                     user = User(user_id=user_id, balance=amount)
                     session.add(user)
 
-                # Транзакцияны базаға жазу
                 session.add(ProcessedTransaction(tx_hash=tx_hash, user_id=user_id))
                 await session.commit()
 
@@ -174,13 +176,11 @@ async def websocket_endpoint(websocket: WebSocket, user_id: int):
 async def round_loop():
     global current_multiplier, crash_multiplier, round_active, accepting_bets
     while True:
-        # 1. Таймер уақыты: 3 секунд — ставка қабылдау уақыты
         accepting_bets = True
         await broadcast({"event": "waiting", "message": "Ставкалар қабылдануда"})
         await asyncio.sleep(3)
         accepting_bets = False
 
-        # 2. Ұшу уақыты
         round_active = True
         current_multiplier = 1.0
         crash_multiplier = round(random.uniform(1.5, 3.0), 2)
@@ -191,7 +191,6 @@ async def round_loop():
             current_multiplier = round(current_multiplier + 0.01, 2)
             await broadcast({"event": "update", "multiplier": current_multiplier})
 
-        # 3. Ұшақ құлады
         round_active = False
         await broadcast({"event": "crash", "at": crash_multiplier})
         bets.clear()
